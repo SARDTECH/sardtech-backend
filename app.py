@@ -33,7 +33,7 @@ def responder_chat():
             return jsonify({"respuesta": "ok"}), 200
         cliente = genai.Client(api_key=API_KEY)
         respuesta = cliente.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-1.5-flash",
             contents=mensaje_cliente,
             config=types.GenerateContentConfig(
                 system_instruction=CONTEXTO,
