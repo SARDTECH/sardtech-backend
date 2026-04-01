@@ -9,7 +9,7 @@ from google import genai
 API_KEY = os.environ.get("GEMINI_API_KEY")
 
 app = Flask(__name__)
-CORS(app) 
+CORS(app)
 
 contexto = """
 Eres el agente experto de soporte técnico y ciberseguridad de SARD TECH.
@@ -19,30 +19,41 @@ Responde de forma concisa, en español de México. Convence al cliente de que SA
 
 @app.route("/chat", methods=["POST"])
 def responder_chat():
+    # Verificar que la API Key esté configurada en Render.com
     if not API_KEY:
-        return jsonify({"error": "Falta configurar la llave en el servidor"}), 500
+        return jsonify({"error": "Falta configurar la llave GEMINI_API_KEY en las variables de entorno del servidor"}), 500
 
     try:
         datos = request.json
         mensaje_cliente = datos.get("mensaje")
-        
+
         if not mensaje_cliente:
             return jsonify({"error": "No enviaste ningún mensaje"}), 400
-            
+
+        # FIX: también ignorar el ping preventivo del frontend
+        if mensaje_cliente.strip().lower() == "ping":
+            return jsonify({"respuesta": "ok"}), 200
+
         cliente_gemini = genai.Client(api_key=API_KEY)
+
+        # FIX 1: Modelo corregido de 'gemini-2.5-flash' (no existe) a 'gemini-2.0-flash'
+        # FIX 2: system_instruction separado del mensaje del usuario para que Gemini lo procese correctamente
         respuesta = cliente_gemini.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=f"{contexto}\nCliente: {mensaje_cliente}\nAgente SARD TECH:"
+            model='gemini-2.0-flash',
+            contents=mensaje_cliente,
+            config=genai.types.GenerateContentConfig(
+                system_instruction=contexto
+            )
         )
-        
-        texto_respuesta = respuesta.text.replace('*', '') 
+
+        texto_respuesta = respuesta.text.replace('*', '')
         return jsonify({"respuesta": texto_respuesta})
-        
+
     except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({"error": "Ocurrió un error en el servidor"}), 500
+        # Imprime el error real en los logs de Render.com para diagnóstico
+        print(f"Error en /chat: {e}", flush=True)
+        return jsonify({"error": f"Ocurrió un error en el servidor: {str(e)}"}), 500
 
 if __name__ == "__main__":
-    # En la nube, el servidor decide el puerto, por eso usamos os.environ.get
     puerto = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=puerto)
