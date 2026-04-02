@@ -1,4 +1,6 @@
-Flask==3.0.2
-flask-cors==4.0.0
-google-genai>=1.0.0
-gunicorn==21.2.0
+flask
+flask-cors
+anthropic
+gunicorn
+python-dotenv
+supabase
