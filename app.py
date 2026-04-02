@@ -184,7 +184,10 @@ Devuelve SOLO el HTML, sin explicaciones.
 """
         msg.attach(MIMEText(html_correo, 'html'))
 
-        with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_USER, [email_destino, SMTP_USER], msg.as_string())
 
