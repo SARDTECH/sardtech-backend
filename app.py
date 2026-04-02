@@ -24,24 +24,55 @@ CORS(app)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ─────────────────────────────────────────
-# CONTEXTO DEL BOT
+# MEMORIA DE CONVERSACIONES (por sesión)
 # ─────────────────────────────────────────
-CONTEXTO = (
-    "Eres el agente experto de soporte técnico y ciberseguridad de SARD TECH. "
-    "Tu objetivo es atender a los visitantes de la página web de forma amable y profesional. "
-    "Responde de forma concisa, en español de México. "
-    "Convence al cliente de que SARD TECH es la mejor opción."
-)
+historial_sesiones = {}
+
+# ─────────────────────────────────────────
+# PROMPT DE PRODUCT DISCOVERY (limpio, sin mensaje del usuario)
+# ─────────────────────────────────────────
+CONTEXTO = """
+Eres el Auditor de Ciberseguridad IA de SARD TECH. Tu objetivo real es hacer 
+Product Discovery y perfilar al cliente, pero ante el usuario estás haciendo 
+un diagnóstico de seguridad completamente gratuito.
+
+REGLAS ESTRICTAS:
+1. Sé conversacional y empático. NO lances una lista de preguntas. 
+   Haz UNA sola pregunta a la vez y reacciona a lo que el cliente te diga.
+
+2. A lo largo de la conversación, DEBES averiguar esta información de forma natural:
+   - ¿Cuántos empleados tienen?
+   - ¿Tienen un área de TI dedicada o la tecnología la maneja el dueño/gerente?
+   - ¿Qué herramientas usan todos los días? (ej. WhatsApp, Google Drive, correos gratuitos)
+   - ¿Han tenido algún susto o incidente de seguridad en el pasado?
+
+3. NUNCA repitas una pregunta que ya hiciste en esta conversación.
+   Usa las respuestas anteriores para contextualizar las siguientes preguntas.
+
+4. LA PREGUNTA DE ORO: Cuando ya tengas una idea de cómo operan, hazle 
+   obligatoriamente esta pregunta exacta:
+   "Para terminar de armar tu perfil, dime en una frase: ¿cuál es tu mayor 
+   miedo relacionado con la tecnología o la seguridad de tu empresa?"
+
+5. EL CIERRE (CAPTURA DE LEAD): Cuando el cliente responda la pregunta de oro, 
+   felicítalo por tomar acción y dile EXACTAMENTE esto:
+   "Tengo un diagnóstico preliminar listo para ti con los puntos ciegos que detecté. 
+   Por favor, escríbeme tu correo electrónico y el nombre de tu empresa para 
+   enviártelo y que un consultor experto de SARD TECH se ponga en contacto contigo."
+
+6. Responde siempre en español de México, de forma concisa y profesional.
+"""
 
 # ─────────────────────────────────────────
 # FUNCIÓN: GUARDAR MENSAJE EN SUPABASE
 # ─────────────────────────────────────────
-def guardar_mensaje(rol: str, contenido: str):
+def guardar_mensaje(session_id: str, rol: str, contenido: str):
     try:
         supabase.table("chats_sardtech").insert({
-            "rol":       rol,
-            "mensaje":   contenido,
-            "creado_en": datetime.utcnow().isoformat()
+            "session_id": session_id,
+            "rol":        rol,
+            "mensaje":    contenido,
+            "creado_en":  datetime.utcnow().isoformat()
         }).execute()
     except Exception as e:
         print(f"[Supabase] Error al guardar: {e}", flush=True)
@@ -64,6 +95,7 @@ def responder_chat():
     try:
         datos           = request.json
         mensaje_cliente = datos.get("mensaje", "").strip()
+        session_id      = datos.get("session_id", "anonimo")
 
         if not mensaje_cliente:
             return jsonify({"error": "Mensaje vacio"}), 400
@@ -71,25 +103,39 @@ def responder_chat():
         if mensaje_cliente.lower() == "ping":
             return jsonify({"respuesta": "ok"}), 200
 
-        # 1️⃣ Guardar mensaje del USUARIO en Supabase
-        guardar_mensaje("user", mensaje_cliente)
+        # 1️⃣ Recuperar o crear historial de esta sesión
+        if session_id not in historial_sesiones:
+            historial_sesiones[session_id] = []
 
-        # 2️⃣ Llamar a Claude (Anthropic)
+        # 2️⃣ Agregar mensaje del usuario al historial
+        historial_sesiones[session_id].append({
+            "role":    "user",
+            "content": mensaje_cliente
+        })
+
+        # 3️⃣ Guardar mensaje del USUARIO en Supabase
+        guardar_mensaje(session_id, "user", mensaje_cliente)
+
+        # 4️⃣ Llamar a Claude con historial completo
         cliente   = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         respuesta = cliente.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=500,
             system=CONTEXTO,
-            messages=[
-                {"role": "user", "content": mensaje_cliente}
-            ]
+            messages=historial_sesiones[session_id]  # ← historial completo
         )
         texto = respuesta.content[0].text.strip()
 
-        # 3️⃣ Guardar respuesta del BOT en Supabase
-        guardar_mensaje("assistant", texto)
+        # 5️⃣ Agregar respuesta del bot al historial
+        historial_sesiones[session_id].append({
+            "role":    "assistant",
+            "content": texto
+        })
 
-        # 4️⃣ Devolver respuesta al cliente
+        # 6️⃣ Guardar respuesta del BOT en Supabase
+        guardar_mensaje(session_id, "assistant", texto)
+
+        # 7️⃣ Devolver respuesta al cliente
         return jsonify({"respuesta": texto}), 200
 
     except Exception as e:
