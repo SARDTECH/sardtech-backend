@@ -1,6 +1,7 @@
 import os
 import re
 import smtplib
+import threading
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from flask import Flask, request, jsonify
@@ -32,13 +33,13 @@ CORS(app)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ─────────────────────────────────────────
-# MEMORIA DE CONVERSACIONES (por sesión)
+# MEMORIA DE CONVERSACIONES
 # ─────────────────────────────────────────
 historial_sesiones = {}
-reporte_enviado    = {}   # evita enviar el reporte dos veces por sesión
+reporte_enviado    = {}
 
 # ─────────────────────────────────────────
-# PROMPT DE PRODUCT DISCOVERY
+# PROMPT KIRA
 # ─────────────────────────────────────────
 CONTEXTO = """
 Eres KIRA, la asesora de Ciberseguridad IA de SARD TECH. Tu objetivo real es hacer
@@ -77,7 +78,7 @@ REGLAS ESTRICTAS:
 """
 
 # ─────────────────────────────────────────
-# FUNCIÓN: DETECTAR EMAIL EN TEXTO
+# DETECTAR EMAIL
 # ─────────────────────────────────────────
 def detectar_email(texto):
     patron = r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
@@ -85,7 +86,7 @@ def detectar_email(texto):
     return match.group(0) if match else None
 
 # ─────────────────────────────────────────
-# FUNCIÓN: GUARDAR MENSAJE EN SUPABASE
+# GUARDAR EN SUPABASE
 # ─────────────────────────────────────────
 def guardar_mensaje(session_id: str, rol: str, contenido: str):
     try:
@@ -96,112 +97,86 @@ def guardar_mensaje(session_id: str, rol: str, contenido: str):
             "creado_en":  datetime.utcnow().isoformat()
         }).execute()
     except Exception as e:
-        print(f"[Supabase] Error al guardar: {e}", flush=True)
+        print(f"[Supabase] Error: {e}", flush=True)
 
 # ─────────────────────────────────────────
-# FUNCIÓN: GENERAR REPORTE PROFESIONAL
+# GENERAR Y ENVIAR REPORTE EN SEGUNDO PLANO
 # ─────────────────────────────────────────
-def generar_reporte(historial, empresa, email_cliente):
-    cliente = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+def enviar_reporte_background(email_destino, empresa, historial):
+    try:
+        cliente = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
-    conversacion_texto = "\n".join([
-        f"{'Cliente' if m['role'] == 'user' else 'Auditor'}: {m['content']}"
-        for m in historial
-    ])
+        conversacion_texto = "\n".join([
+            f"{'Cliente' if m['role'] == 'user' else 'KIRA'}: {m['content']}"
+            for m in historial
+        ])
 
-    prompt_reporte = f"""
+        prompt_reporte = f"""
 Basándote en esta conversación de auditoría de ciberseguridad, genera un reporte profesional
-en HTML para la empresa "{empresa}" (correo: {email_cliente}).
+en HTML para la empresa "{empresa}" (correo: {email_destino}).
 
 CONVERSACIÓN:
 {conversacion_texto}
 
-El reporte debe tener esta estructura en HTML profesional con estilos inline (fondo blanco, tipografía limpia):
+Genera un reporte HTML profesional con estilos inline (fondo blanco, tipografía limpia) con:
 
-1. ENCABEZADO: Logo textual SARD TECH, título "Reporte de Diagnóstico de Ciberseguridad", fecha de hoy, nombre de empresa
-2. RESUMEN EJECUTIVO: 2-3 oraciones describiendo el perfil de la empresa detectado
-3. VULNERABILIDADES DETECTADAS: Lista de 3-5 riesgos específicos identificados en la conversación, cada uno con:
-   - Nombre del riesgo
-   - Nivel: ALTO / MEDIO / BAJO (con color rojo/amarillo/verde)
-   - Descripción breve
-   - Recomendación concreta
-4. PERFIL DE LA EMPRESA: Tabla con los datos recopilados (empleados, herramientas, área TI, incidentes)
+1. ENCABEZADO: SARD TECH, título "Reporte de Diagnóstico de Ciberseguridad", fecha de hoy, nombre empresa
+2. RESUMEN EJECUTIVO: 2-3 oraciones del perfil detectado
+3. VULNERABILIDADES DETECTADAS: 3-5 riesgos con nivel ALTO/MEDIO/BAJO en colores rojo/amarillo/verde
+4. PERFIL DE LA EMPRESA: Tabla con datos recopilados
 5. PLAN DE ACCIÓN INMEDIATA: 3 acciones que pueden hacer HOY sin costo
-6. PRÓXIMOS PASOS: Cómo SARD TECH puede ayudar con una llamada sin compromiso
-7. PIE: Datos de contacto SARD TECH, contacto@sardtech.com.mx, sardtech.com.mx
+6. PRÓXIMOS PASOS: Cómo SARD TECH puede ayudar
+7. PIE: contacto@sardtech.com.mx · sardtech.com.mx
 
-Usa colores: fondo blanco, acentos en #00b8d4, texto oscuro #1a1a2e.
-Todo en español de México. Formato profesional como los reportes de consultoría IT de grandes firmas.
-Devuelve SOLO el HTML del reporte, sin explicaciones adicionales.
+Colores: fondo blanco, acentos #00b8d4, texto #1a1a2e. Todo en español de México.
+Devuelve SOLO el HTML, sin explicaciones.
 """
-
-    respuesta = cliente.messages.create(
-        model="claude-sonnet-4-5",
-        max_tokens=3000,
-        messages=[{"role": "user", "content": prompt_reporte}]
-    )
-    return respuesta.content[0].text.strip()
-
-# ─────────────────────────────────────────
-# FUNCIÓN: ENVIAR CORREO CON REPORTE
-# ─────────────────────────────────────────
-def enviar_reporte_por_correo(email_destino, empresa, historial):
-    try:
-        reporte_html = generar_reporte(historial, empresa, email_destino)
+        respuesta = cliente.messages.create(
+            model="claude-sonnet-4-5",
+            max_tokens=3000,
+            messages=[{"role": "user", "content": prompt_reporte}]
+        )
+        reporte_html = respuesta.content[0].text.strip()
 
         msg = MIMEMultipart('alternative')
-        msg['Subject'] = f"🛡️ Tu Diagnóstico de Ciberseguridad — SARD TECH"
-        msg['From']    = f"SARD TECH <{SMTP_USER}>"
+        msg['Subject'] = "🛡️ Tu Diagnóstico de Ciberseguridad — SARD TECH"
+        msg['From']    = f"KIRA · SARD TECH <{SMTP_USER}>"
         msg['To']      = email_destino
-        msg['Bcc']     = SMTP_USER  # copia a SARD TECH
+        msg['Bcc']     = SMTP_USER
 
-        # Cuerpo del correo
         html_correo = f"""
 <!DOCTYPE html>
 <html lang="es">
 <head><meta charset="UTF-8"/></head>
 <body style="margin:0;padding:0;background:#f4f6f9;font-family:Arial,sans-serif;">
-  <div style="max-width:680px;margin:0 auto;background:#ffffff;border-radius:12px;overflow:hidden;margin-top:30px;margin-bottom:30px;box-shadow:0 4px 20px rgba(0,0,0,0.08);">
-
-    <!-- HEADER -->
+  <div style="max-width:680px;margin:30px auto;background:#fff;border-radius:12px;overflow:hidden;box-shadow:0 4px 20px rgba(0,0,0,0.08);">
     <div style="background:#080c10;padding:30px 40px;text-align:center;">
-      <h1 style="color:#00e5ff;font-size:28px;margin:0;letter-spacing:3px;font-weight:900;">SARD TECH</h1>
-      <p style="color:#7d8590;font-size:12px;margin:6px 0 0;letter-spacing:2px;">// CYBERSECURITY AI PLATFORM</p>
+      <h1 style="color:#00e5ff;font-size:28px;margin:0;letter-spacing:3px;">SARD TECH</h1>
+      <p style="color:#7d8590;font-size:12px;margin:6px 0 0;letter-spacing:2px;">// CYBERSECURITY AI PLATFORM · KIRA</p>
     </div>
-
-    <!-- MENSAJE INTRO -->
     <div style="padding:36px 40px 20px;">
       <h2 style="color:#080c10;font-size:22px;margin:0 0 14px;">Tu diagnóstico está listo, {empresa}</h2>
       <p style="color:#555;font-size:15px;line-height:1.7;margin:0 0 16px;">
-        Gracias por completar tu auditoría de ciberseguridad con SARD TECH. Hemos analizado tu conversación
-        y preparado un reporte personalizado con los puntos ciegos detectados en tu operación.
+        Gracias por completar tu auditoría con KIRA. Hemos analizado tu conversación
+        y preparado un reporte personalizado con los puntos ciegos detectados.
       </p>
       <p style="color:#555;font-size:15px;line-height:1.7;margin:0;">
-        Un consultor experto de SARD TECH se pondrá en contacto contigo en las próximas 24 horas
-        para revisar el reporte juntos y responder tus dudas, sin ningún compromiso.
+        Un consultor de SARD TECH se pondrá en contacto en las próximas 24 horas sin ningún compromiso.
       </p>
     </div>
-
-    <!-- SEPARADOR -->
     <div style="height:2px;background:linear-gradient(90deg,#00e5ff,transparent);margin:0 40px;"></div>
-
-    <!-- REPORTE -->
     <div style="padding:24px 40px 36px;">
       <h3 style="color:#080c10;font-size:16px;margin:0 0 20px;text-transform:uppercase;letter-spacing:1px;">📋 Tu Reporte de Diagnóstico</h3>
       {reporte_html}
     </div>
-
-    <!-- CTA -->
     <div style="background:#f8f9fa;padding:28px 40px;text-align:center;border-top:1px solid #eee;">
-      <p style="color:#555;font-size:14px;margin:0 0 16px;">¿Tienes dudas o quieres hablar con un experto ahora?</p>
+      <p style="color:#555;font-size:14px;margin:0 0 16px;">¿Quieres hablar con un experto ahora?</p>
       <a href="https://wa.me/525633212240" style="display:inline-block;background:#25D366;color:white;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:14px;margin-right:10px;">WhatsApp</a>
       <a href="mailto:contacto@sardtech.com.mx" style="display:inline-block;background:#080c10;color:#00e5ff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;font-size:14px;">Correo</a>
     </div>
-
-    <!-- FOOTER -->
     <div style="background:#080c10;padding:20px 40px;text-align:center;">
       <p style="color:#7d8590;font-size:12px;margin:0;">© 2026 SARD TECH · contacto@sardtech.com.mx · sardtech.com.mx</p>
-      <p style="color:#555;font-size:11px;margin:6px 0 0;">Este reporte es confidencial y fue generado exclusivamente para {empresa}.</p>
+      <p style="color:#555;font-size:11px;margin:6px 0 0;">Reporte confidencial generado exclusivamente para {empresa}.</p>
     </div>
   </div>
 </body>
@@ -214,18 +189,16 @@ def enviar_reporte_por_correo(email_destino, empresa, historial):
             server.sendmail(SMTP_USER, [email_destino, SMTP_USER], msg.as_string())
 
         print(f"[Email] Reporte enviado a {email_destino}", flush=True)
-        return True
 
     except Exception as e:
-        print(f"[Email] Error al enviar: {e}", flush=True)
-        return False
+        print(f"[Email] Error: {e}", flush=True)
 
 # ─────────────────────────────────────────
 # RUTA: HEALTH CHECK
 # ─────────────────────────────────────────
 @app.route("/", methods=["GET"])
 def home():
-    return jsonify({"status": "SARD TECH Bot activo"}), 200
+    return jsonify({"status": "SARD TECH Bot activo — KIRA online"}), 200
 
 # ─────────────────────────────────────────
 # RUTA: CHAT
@@ -246,19 +219,16 @@ def responder_chat():
         if mensaje_cliente.lower() == "ping":
             return jsonify({"respuesta": "ok"}), 200
 
-        # Inicializar historial si no existe
         if session_id not in historial_sesiones:
             historial_sesiones[session_id] = []
 
-        # Agregar mensaje del usuario
         historial_sesiones[session_id].append({
             "role": "user", "content": mensaje_cliente
         })
 
-        # Guardar en Supabase
         guardar_mensaje(session_id, "user", mensaje_cliente)
 
-        # Llamar a Claude
+        # Llamar a KIRA
         cliente   = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
         respuesta = cliente.messages.create(
             model="claude-sonnet-4-5",
@@ -268,23 +238,20 @@ def responder_chat():
         )
         texto = respuesta.content[0].text.strip()
 
-        # Agregar respuesta al historial
         historial_sesiones[session_id].append({
             "role": "assistant", "content": texto
         })
 
-        # Guardar en Supabase
         guardar_mensaje(session_id, "assistant", texto)
 
-        # ── DETECCIÓN DE EMAIL Y ENVÍO DE REPORTE ──
+        # ── DETECCIÓN DE EMAIL ──
         reporte_enviado_flag = False
         email_detectado = detectar_email(mensaje_cliente)
 
         if email_detectado and session_id not in reporte_enviado:
             reporte_enviado[session_id] = True
 
-            # Detectar nombre de empresa (texto después de la coma si existe)
-            partes = mensaje_cliente.split(',')
+            partes  = mensaje_cliente.split(',')
             empresa = partes[1].strip() if len(partes) > 1 else "tu empresa"
 
             # Guardar lead en Supabase
@@ -298,14 +265,15 @@ def responder_chat():
             except Exception as e:
                 print(f"[Supabase] Error lead: {e}", flush=True)
 
-            # Enviar reporte por correo
+            # ── ENVIAR EN SEGUNDO PLANO (no bloquea la respuesta) ──
             if SMTP_PASS:
-                exito = enviar_reporte_por_correo(
-                    email_detectado,
-                    empresa,
-                    historial_sesiones[session_id]
+                hilo = threading.Thread(
+                    target=enviar_reporte_background,
+                    args=(email_detectado, empresa, historial_sesiones[session_id].copy()),
+                    daemon=True
                 )
-                reporte_enviado_flag = exito
+                hilo.start()
+                reporte_enviado_flag = True
 
         return jsonify({
             "respuesta":       texto,
