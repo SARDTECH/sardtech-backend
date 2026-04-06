@@ -129,6 +129,8 @@ def enviar_reporte_resend(email_destino, empresa, historial):
     def _enviar():
         try:
             reporte_html = generar_reporte(historial, empresa, email_destino)
+            # Limpiar etiquetas de markdown
+            reporte_html = reporte_html.replace("```html", "").replace("```", "").strip()
             html_correo = f"""
 <!DOCTYPE html>
 <html lang="es">
